@@ -13,11 +13,15 @@
 
 #include <linux/rtnetlink.h>
 #include <libmnl/libmnl.h>
+#include <confuse.h>
 #include <ev.h>
 
 #include "nlutils.h"
 
 
+#define DEFAULT_CONF_FILE SYSCONFDIR "/nlddcd.conf"
+
+cfg_t *config;
 ev_io nl_watcher;
 ev_timer addr_timeout_watcher;
 ev_signal stop_watcher;
@@ -36,8 +40,9 @@ void help(void)
            "Netlink-based Dynamic DNS Client Daemon.\n"
            "\n"
            "Options:\n"
-           "  -h, --help     Show this help message and exit.\n"
-           "  -v, --version  Show version info and exit.\n");
+           "  -h, --help              Show this help message and exit.\n"
+           "  -v, --version           Show version info and exit.\n"
+           "  -c FILE, --config FILE  Read configuration from FILE.\n");
 }
 
 
@@ -154,12 +159,15 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
     const struct ifaddrmsg *ifa = mnl_nlmsg_get_payload(nlh);
     size_t addrsize = af_addr_size(ifa->ifa_family);
 
+    if_indextoname(ifa->ifa_index, ifname);
+    /*
     printf("  nlmsg_type:  %s\n", nlmsg_type2str(nlh->nlmsg_type));
     printf("    ifa_family:    %s\n", ifa_family2str(ifa->ifa_family));
     printf("    ifa_prefixlen: %u\n", ifa->ifa_prefixlen);
     printf("    ifa_flags:     %s\n", ifa_flags2str(ifa->ifa_flags));
     printf("    ifa_scope:     %s\n", rtm_scope2str(ifa->ifa_scope));
-    printf("    ifa_index:     %s (%d)\n", if_indextoname(ifa->ifa_index, ifname), ifa->ifa_index);
+    printf("    ifa_index:     %s (%d)\n", ifname, ifa->ifa_index);
+    */
 
     mnl_attr_for_each(attr, nlh, sizeof *ifa) {
         if (mnl_attr_type_valid(attr, RTA_MAX) > 0) {
@@ -182,7 +190,7 @@ int nl_msg_cb(const struct nlmsghdr *nlh, void *data)
 {
     switch (nlh->nlmsg_type) {
     case RTM_NEWADDR:
-    case RTM_DELADDR:
+    //case RTM_DELADDR:
         parse_addr_msg(nlh);
         break;
     }
@@ -292,22 +300,77 @@ void stop_cb(EV_P_ ev_signal *w, int revents)
 }
 
 
+int validate_interface_config(cfg_t *cfg, cfg_opt_t *opt)
+{
+    int ret = CFG_SUCCESS;
+
+    // get the last parsed interface section
+    cfg_t *sec = cfg_opt_getnsec(opt, cfg_opt_size(opt) - 1);
+
+    // all sub-options are mandatory
+    for (cfg_opt_t *subopt = opt->subopts; subopt->type != CFGT_NONE; subopt++) {
+        if (cfg_size(sec, subopt->name) < 1) {
+            cfg_error(cfg, "Missing %s in interface section", subopt->name);
+            ret = CFG_PARSE_ERROR;
+        }
+    }
+
+    return ret;
+}
+
+
+cfg_t *read_config(const char *cfgfile)
+{
+    cfg_opt_t interface_opts[] = {
+        CFG_STR("url", 0, CFGF_NODEFAULT),
+        CFG_STR("login", 0, CFGF_NODEFAULT),
+        CFG_STR("password", 0, CFGF_NODEFAULT),
+        CFG_STR("domain", 0, CFGF_NODEFAULT),
+        CFG_END()
+    };
+
+    cfg_opt_t opts[] = {
+        CFG_SEC("interface", interface_opts, CFGF_MULTI | CFGF_TITLE | CFGF_NO_TITLE_DUPES),
+        CFG_END()
+    };
+
+    cfg_t *cfg = cfg_init(opts, CFGF_NONE);
+    cfg_set_validate_func(cfg, "interface", validate_interface_config);
+
+    switch (cfg_parse(cfg, cfgfile)) {
+    case CFG_SUCCESS:
+        return cfg;
+    case CFG_FILE_ERROR:
+        perror(cfgfile);
+        break;
+    }
+
+    cfg_free(cfg);
+    return NULL;
+}
+
+
 int main(int argc, char *argv[])
 {
     int opt;
+    const char *cfgfile = DEFAULT_CONF_FILE;
     int ret = EXIT_FAILURE;
     struct mnl_socket *nl;
     struct ev_loop *loop = EV_DEFAULT;
 
     // parse command line
     const struct option options[] = {
-        { "help",    no_argument, 0, 'h' },
-        { "version", no_argument, 0, 'v' },
-        { 0,         0,           0,  0  },
+        { "help",    no_argument,       0, 'h' },
+        { "version", no_argument,       0, 'v' },
+        { "config",  required_argument, 0, 'c' },
+        { 0,         0,                 0,  0  },
     };
 
-    while ((opt = getopt_long(argc, argv, "hv", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hvc:", options, NULL)) != -1) {
         switch (opt) {
+        case 'c':
+            cfgfile = optarg;
+            break;
         case 'h':
             help();
             return EXIT_SUCCESS;
@@ -321,7 +384,7 @@ int main(int argc, char *argv[])
     }
 
     // read configuration
-    if (1) {
+    if ((config = read_config(cfgfile)) != NULL) {
         // open netlink
         if ((nl = nl_open()) != NULL) {
             // init event loop
