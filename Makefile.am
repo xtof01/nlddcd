@@ -1,0 +1,27 @@
+##%.service: %.service.in $(top_builddir)/config.status
+##	$(AM_V_GEN)$(SED)				\
+##	    -e 's|[@]sbindir[@]|$(sbindir)|g'		\
+##	    -e 's|[@]sysconfdir[@]|$(sysconfdir)|g'	\
+##	    < $< > $@-t &&				\
+##	    mv $@-t $@
+
+##install-data-local:
+##	$(MKDIR_P) $(DESTDIR)$(sysconfdir)/sysconfig
+##	$(INSTALL_DATA) $(srcdir)/gw-monitor.sysconfig \
+##	    $(DESTDIR)$(sysconfdir)/sysconfig/gw-monitor
+
+##uninstall-local:
+##	rm -f $(DESTDIR)$(sysconfdir)/sysconfig/gw-monitor
+##	rmdir $(DESTDIR)$(sysconfdir)/sysconfig || :
+
+sbin_PROGRAMS = nlddcd
+##systemdsystemunit_DATA = gw-monitor.service
+##dist_man_MANS = gw-monitor.8
+
+AM_CFLAGS = $(MNL_CFLAGS)
+
+nlddcd_SOURCES = nlddcd.c nlutils.c nlutils.h
+nlddcd_LDADD = $(MNL_LIBS)
+
+##CLEANFILES = $(systemdsystemunit_DATA)
+##EXTRA_DIST = gw-monitor.service.in gw-monitor.sysconfig
