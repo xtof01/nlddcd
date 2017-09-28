@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include <string.h>
 #include <limits.h>
 #include <getopt.h>
@@ -21,9 +23,33 @@
 
 #define DEFAULT_CONF_FILE SYSCONFDIR "/nlddcd.conf"
 
+#define container_of(ptr, type, member) ({                      \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)( (char *)__mptr - offsetof(type, member) );})
+
+
+typedef struct interface_status {
+    ev_timer timeout;
+    const char *ifname;
+    const char *url;
+    const char *login;
+    const char *password;
+    const char *domain;
+    struct in_addr  local_ipaddr;
+    struct in_addr  dns_ipaddr;
+    struct in6_addr local_ip6addr;
+    struct in6_addr dns_ip6addr;
+    bool local_ipaddr_set;
+    bool dns_ipaddr_set;
+    bool local_ip6addr_set;
+    bool dns_ip6addr_set;
+    struct interface_status *next;
+} interface_status_t;
+
+
+interface_status_t *if_stat_head;
 cfg_t *config;
 ev_io nl_watcher;
-ev_timer addr_timeout_watcher;
 ev_signal stop_watcher;
 
 
@@ -154,7 +180,7 @@ int parse_addr_attr_cb(const struct nlattr *attr, void *data)
 void parse_addr_msg(const struct nlmsghdr *nlh)
 {
     char ifname[IF_NAMESIZE];
-    char addr[INET6_ADDRSTRLEN];
+    const void *addr = NULL;
     const struct nlattr *attr;
     const struct ifaddrmsg *ifa = mnl_nlmsg_get_payload(nlh);
     size_t addrsize = af_addr_size(ifa->ifa_family);
@@ -175,14 +201,48 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
 
             if (type == IFA_LOCAL) {
                 if (mnl_attr_validate2(attr, MNL_TYPE_BINARY, addrsize) >= 0) {
-                    inet_ntop(ifa->ifa_family, mnl_attr_get_payload(attr), addr, sizeof addr);
-                    printf("        local:   %s\n", addr);
+                    addr = mnl_attr_get_payload(attr);
                 }
             }
         }
     }
 
     //mnl_attr_parse(nlh, sizeof *ifa, parse_addr_attr_cb, (void *)(uintptr_t)ifa->ifa_family);
+
+    if (addr != NULL) {
+        interface_status_t *if_stat;
+
+        for (if_stat = if_stat_head; if_stat != NULL; if_stat = if_stat->next) {
+            if (strncmp(if_stat->ifname, ifname, IF_NAMESIZE) == 0) {
+                void *local_addr = NULL;
+                bool *local_addr_set = NULL;
+
+                switch (ifa->ifa_family) {
+                case AF_INET:
+                    local_addr = &if_stat->local_ipaddr;
+                    local_addr_set = &if_stat->local_ipaddr_set;
+                    break;
+                case AF_INET6:
+                    local_addr = &if_stat->local_ip6addr;
+                    local_addr_set = &if_stat->local_ip6addr_set;
+                    break;
+                default:
+                    continue;
+                }
+
+                if (!*local_addr_set || memcmp(local_addr, addr, addrsize) != 0) {
+                    char addrstr[INET6_ADDRSTRLEN];
+
+                    printf("detected address change on %s: %s\n",
+                           ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
+                    memcpy(local_addr, addr, addrsize);
+                    *local_addr_set = true;
+
+                    ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
+                }
+            }
+        }
+    }
 }
 
 
@@ -190,7 +250,6 @@ int nl_msg_cb(const struct nlmsghdr *nlh, void *data)
 {
     switch (nlh->nlmsg_type) {
     case RTM_NEWADDR:
-    //case RTM_DELADDR:
         parse_addr_msg(nlh);
         break;
     }
@@ -287,10 +346,13 @@ void nl_cb(EV_P_ ev_io *w, int revents)
 
 void timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-    struct mnl_socket *nl = w->data;
+    interface_status_t *if_stat = container_of(w, interface_status_t, timeout);
 
     ev_timer_stop(EV_A_ w);
-    request_addr_dump(nl);
+
+    printf("timeout for interface %s\n", if_stat->ifname);
+
+    // TODO
 }
 
 
@@ -309,8 +371,8 @@ int validate_interface_config(cfg_t *cfg, cfg_opt_t *opt)
 
     // all sub-options are mandatory
     for (cfg_opt_t *subopt = opt->subopts; subopt->type != CFGT_NONE; subopt++) {
-        if (cfg_size(sec, subopt->name) < 1) {
-            cfg_error(cfg, "Missing %s in interface section", subopt->name);
+        if (cfg_size(sec, cfg_opt_name(subopt)) < 1) {
+            cfg_error(cfg, "Missing %s in interface section", cfg_opt_name(subopt));
             ret = CFG_PARSE_ERROR;
         }
     }
@@ -350,6 +412,32 @@ cfg_t *read_config(const char *cfgfile)
 }
 
 
+void prepare_status(void)
+{
+    unsigned int i, num_interfaces;
+    interface_status_t *if_stat;
+
+    if_stat_head = NULL;
+    num_interfaces = cfg_size(config, "interface");
+
+    for (i = 0; i < num_interfaces; i++) {
+        if_stat = calloc(sizeof *if_stat, 1);
+
+        ev_timer_init(&if_stat->timeout, timeout_cb, 0.0, 5.0);
+
+        cfg_t *interface = cfg_getnsec(config, "interface", i);
+        if_stat->ifname = cfg_title(interface);
+        if_stat->url = cfg_getstr(interface, "url");
+        if_stat->login = cfg_getstr(interface, "login");
+        if_stat->password = cfg_getstr(interface, "password");
+        if_stat->domain = cfg_getstr(interface, "domain");
+
+        if_stat->next = if_stat_head;
+        if_stat_head = if_stat;
+    }
+}
+
+
 int main(int argc, char *argv[])
 {
     int opt;
@@ -385,6 +473,8 @@ int main(int argc, char *argv[])
 
     // read configuration
     if ((config = read_config(cfgfile)) != NULL) {
+        prepare_status();
+
         // open netlink
         if ((nl = nl_open()) != NULL) {
             // init event loop
@@ -392,18 +482,19 @@ int main(int argc, char *argv[])
             nl_watcher.data = nl;
             ev_io_start(loop, &nl_watcher);
 
-            ev_timer_init(&addr_timeout_watcher, timeout_cb, 0.0, 2.0);
-            addr_timeout_watcher.data = nl;
-            ev_timer_start(loop, &addr_timeout_watcher);
-
             ev_signal_init(&stop_watcher, stop_cb, SIGTERM);
             ev_signal_start(loop, &stop_watcher);
+
+            // request initial address dump
+            request_addr_dump(nl);
 
             ev_run(loop, 0);
             ret = EXIT_SUCCESS;
 
             mnl_socket_close(nl);
         }
+
+        cfg_free(config);
     }
 
     return ret;
