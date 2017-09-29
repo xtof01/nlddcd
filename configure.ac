@@ -13,6 +13,7 @@ AC_CHECK_LIB([ev], [ev_run], [], [AC_MSG_ERROR([libev not found])])
 
 PKG_CHECK_MODULES([MNL], [libmnl >= 1.0])
 PKG_CHECK_MODULES([CONFUSE], [libconfuse >= 2.7])
+PKG_CHECK_MODULES([CURL], [libcurl])
 
 dnl AC_ARG_WITH([systemdsystemunitdir],
 dnl         AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files]),

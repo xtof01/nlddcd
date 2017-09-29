@@ -4,51 +4,44 @@
 #include <stdbool.h>
 #include <string.h>
 #include <limits.h>
+#include <ctype.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
 #include <signal.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #include <linux/rtnetlink.h>
 #include <libmnl/libmnl.h>
-#include <confuse.h>
+#include <curl/curl.h>
 #include <ev.h>
 
-#include "nlutils.h"
+#include "conf.h"
 
 
 #define DEFAULT_CONF_FILE SYSCONFDIR "/nlddcd.conf"
+#define NLDDCD_USERAGENT  "nlddcd/1.0"
+
+#define MIN(a, b)  (((a) < (b)) ? (a) : (b))
 
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type, member) );})
 
 
-typedef struct interface_status {
-    ev_timer timeout;
-    const char *ifname;
-    const char *url;
-    const char *login;
-    const char *password;
-    const char *domain;
-    struct in_addr  local_ipaddr;
-    struct in_addr  dns_ipaddr;
-    struct in6_addr local_ip6addr;
-    struct in6_addr dns_ip6addr;
-    bool local_ipaddr_set;
-    bool dns_ipaddr_set;
-    bool local_ip6addr_set;
-    bool dns_ip6addr_set;
-    struct interface_status *next;
-} interface_status_t;
+typedef struct {
+    char data[256];
+    size_t length;
+} response_t;
 
 
 interface_status_t *if_stat_head;
-cfg_t *config;
 ev_io nl_watcher;
 ev_signal stop_watcher;
 
@@ -79,6 +72,174 @@ void version(void)
            "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.\n"
            "This is free software: you are free to change and redistribute it.\n"
            "There is NO WARRANTY, to the extent permitted by law.\n");
+}
+
+
+size_t curl_recv_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    response_t *response = userdata;
+    size_t bytes_avail = size * nmemb;
+    size_t bytes_free = sizeof response->data - response->length - 1;
+    size_t bytes_to_copy = MIN(bytes_avail, bytes_free);
+
+    memcpy(response->data + response->length, ptr, bytes_to_copy);
+    response->length += bytes_to_copy;
+
+    return bytes_avail;
+}
+
+
+void perform_ddns_update(interface_status_t *if_stat)
+{
+    CURL *curl;
+    char ipaddrstr[INET_ADDRSTRLEN];
+    char ip6addrstr[INET6_ADDRSTRLEN];
+    size_t buflen = strlen(if_stat->url) + strlen(if_stat->domain) + 128;
+    char *urlbuffer = malloc(buflen);
+    char *errorbuffer = malloc(CURL_ERROR_SIZE);
+    response_t *response = malloc(sizeof *response);
+
+    int n_addrs = 0;
+
+    if (if_stat->local_ipaddr_set) {
+        inet_ntop(AF_INET, &if_stat->local_ipaddr, ipaddrstr, sizeof ipaddrstr);
+        n_addrs++;
+    }
+    if (if_stat->local_ip6addr_set) {
+        inet_ntop(AF_INET6, &if_stat->local_ip6addr, ip6addrstr, sizeof ip6addrstr);
+        n_addrs++;
+    }
+
+    snprintf(urlbuffer, buflen, "%s?hostname=%s&myip=%s%s%s",
+             if_stat->url, if_stat->domain,
+             if_stat->local_ipaddr_set ? ipaddrstr : "",
+             n_addrs > 1 ? "," : "",
+             if_stat->local_ip6addr_set ? ip6addrstr : "");
+
+    //printf("URL: %s\n", urlbuffer);
+
+    if ((curl = curl_easy_init()) != NULL) {
+        CURLcode res;
+
+        curl_easy_setopt(curl, CURLOPT_URL, urlbuffer);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, NLDDCD_USERAGENT);
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERNAME, if_stat->login);
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, if_stat->password);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_recv_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorbuffer);
+
+        errorbuffer[0] = 0;
+        response->length = 0;
+
+        res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            int i;
+
+            response->data[response->length] = 0;
+            printf("response: %s\n", response->data);
+
+            for (i = 0; i < response->length; i++) {
+                if (!isalnum(response->data[i])) {
+                    response->data[i] = 0;
+                    break;
+                }
+            }
+
+            if (strcmp(response->data, "good") == 0 ||
+                strcmp(response->data, "nochg") == 0) {
+                printf("Update succeeded\n");
+                if (if_stat->local_ipaddr_set) {
+                    if_stat->dns_ipaddr = if_stat->local_ipaddr;
+                }
+                if (if_stat->local_ip6addr_set) {
+                    if_stat->dns_ip6addr = if_stat->local_ip6addr;
+                }
+            }
+            else {
+                printf("Update failed\n");
+            }
+        }
+        else {
+            size_t len = strlen(errorbuffer);
+
+            fprintf(stderr, "error: (%d) ", res);
+            if (len > 0) {
+                fprintf(stderr, "%s%s", errorbuffer,
+                        ((errorbuffer[len - 1] != '\n') ? "\n" : ""));
+            }
+            else {
+                fprintf(stderr, "%s\n", curl_easy_strerror(res));
+            }
+        }
+        curl_easy_cleanup(curl);
+    }
+
+    free(response);
+    free(errorbuffer);
+    free(urlbuffer);
+}
+
+
+void resolve_domain(interface_status_t *if_stat)
+{
+    struct addrinfo hints, *result, *addr;
+    int ret;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    ret = getaddrinfo(if_stat->domain, NULL, &hints, &result);
+    if (ret == 0) {
+        for (addr = result; addr != NULL; addr = addr->ai_next) {
+            switch (addr->ai_family) {
+            case AF_INET:
+                if_stat->dns_ipaddr = ((struct sockaddr_in *)addr->ai_addr)->sin_addr;
+                break;
+            case AF_INET6:
+                if_stat->dns_ip6addr = ((struct sockaddr_in6 *)addr->ai_addr)->sin6_addr;
+                break;
+            }
+        }
+
+        freeaddrinfo(result);
+    }
+    else {
+        fprintf(stderr, "%s: %s\n", if_stat->domain, gai_strerror(ret));
+    }
+
+    if_stat->dns_ipaddr_set = true;
+    if_stat->dns_ip6addr_set = true;
+}
+
+
+void timeout_cb(EV_P_ ev_timer *w, int revents)
+{
+    bool update_required = false;
+    interface_status_t *if_stat = container_of(w, interface_status_t, timeout);
+
+    ev_timer_stop(EV_A_ w);
+
+    if (!if_stat->dns_ipaddr_set || !if_stat->dns_ip6addr_set) {
+        resolve_domain(if_stat);
+    }
+
+    if (if_stat->local_ipaddr.s_addr != if_stat->dns_ipaddr.s_addr) {
+        printf("IPv4 address of interface %s differs from address of %s\n",
+               if_stat->ifname, if_stat->domain);
+        update_required = true;
+    }
+    if (memcmp(if_stat->local_ip6addr.s6_addr, if_stat->dns_ip6addr.s6_addr, 16) != 0) {
+        printf("IPv6 address of interface %s differs from address of %s\n",
+               if_stat->ifname, if_stat->domain);
+        update_required = true;
+    }
+
+    if (update_required) {
+        perform_ddns_update(if_stat);
+    }
 }
 
 
@@ -344,97 +505,9 @@ void nl_cb(EV_P_ ev_io *w, int revents)
 }
 
 
-void timeout_cb(EV_P_ ev_timer *w, int revents)
-{
-    interface_status_t *if_stat = container_of(w, interface_status_t, timeout);
-
-    ev_timer_stop(EV_A_ w);
-
-    printf("timeout for interface %s\n", if_stat->ifname);
-
-    // TODO
-}
-
-
 void stop_cb(EV_P_ ev_signal *w, int revents)
 {
     ev_break(EV_A_ EVBREAK_ALL);
-}
-
-
-int validate_interface_config(cfg_t *cfg, cfg_opt_t *opt)
-{
-    int ret = CFG_SUCCESS;
-
-    // get the last parsed interface section
-    cfg_t *sec = cfg_opt_getnsec(opt, cfg_opt_size(opt) - 1);
-
-    // all sub-options are mandatory
-    for (cfg_opt_t *subopt = opt->subopts; subopt->type != CFGT_NONE; subopt++) {
-        if (cfg_size(sec, cfg_opt_name(subopt)) < 1) {
-            cfg_error(cfg, "Missing %s in interface section", cfg_opt_name(subopt));
-            ret = CFG_PARSE_ERROR;
-        }
-    }
-
-    return ret;
-}
-
-
-cfg_t *read_config(const char *cfgfile)
-{
-    cfg_opt_t interface_opts[] = {
-        CFG_STR("url", 0, CFGF_NODEFAULT),
-        CFG_STR("login", 0, CFGF_NODEFAULT),
-        CFG_STR("password", 0, CFGF_NODEFAULT),
-        CFG_STR("domain", 0, CFGF_NODEFAULT),
-        CFG_END()
-    };
-
-    cfg_opt_t opts[] = {
-        CFG_SEC("interface", interface_opts, CFGF_MULTI | CFGF_TITLE | CFGF_NO_TITLE_DUPES),
-        CFG_END()
-    };
-
-    cfg_t *cfg = cfg_init(opts, CFGF_NONE);
-    cfg_set_validate_func(cfg, "interface", validate_interface_config);
-
-    switch (cfg_parse(cfg, cfgfile)) {
-    case CFG_SUCCESS:
-        return cfg;
-    case CFG_FILE_ERROR:
-        perror(cfgfile);
-        break;
-    }
-
-    cfg_free(cfg);
-    return NULL;
-}
-
-
-void prepare_status(void)
-{
-    unsigned int i, num_interfaces;
-    interface_status_t *if_stat;
-
-    if_stat_head = NULL;
-    num_interfaces = cfg_size(config, "interface");
-
-    for (i = 0; i < num_interfaces; i++) {
-        if_stat = calloc(sizeof *if_stat, 1);
-
-        ev_timer_init(&if_stat->timeout, timeout_cb, 0.0, 5.0);
-
-        cfg_t *interface = cfg_getnsec(config, "interface", i);
-        if_stat->ifname = cfg_title(interface);
-        if_stat->url = cfg_getstr(interface, "url");
-        if_stat->login = cfg_getstr(interface, "login");
-        if_stat->password = cfg_getstr(interface, "password");
-        if_stat->domain = cfg_getstr(interface, "domain");
-
-        if_stat->next = if_stat_head;
-        if_stat_head = if_stat;
-    }
 }
 
 
@@ -469,32 +542,36 @@ int main(int argc, char *argv[])
             syntax();
             return EXIT_FAILURE;
         }
+
     }
 
-    // read configuration
-    if ((config = read_config(cfgfile)) != NULL) {
-        prepare_status();
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK) {
+        // read configuration
+        if (read_config(cfgfile, &if_stat_head)) {
 
-        // open netlink
-        if ((nl = nl_open()) != NULL) {
-            // init event loop
-            ev_io_init(&nl_watcher, nl_cb, mnl_socket_get_fd(nl), EV_READ);
-            nl_watcher.data = nl;
-            ev_io_start(loop, &nl_watcher);
+            // open netlink
+            if ((nl = nl_open()) != NULL) {
+                // init event loop
+                ev_io_init(&nl_watcher, nl_cb, mnl_socket_get_fd(nl), EV_READ);
+                nl_watcher.data = nl;
+                ev_io_start(loop, &nl_watcher);
 
-            ev_signal_init(&stop_watcher, stop_cb, SIGTERM);
-            ev_signal_start(loop, &stop_watcher);
+                ev_signal_init(&stop_watcher, stop_cb, SIGTERM);
+                ev_signal_start(loop, &stop_watcher);
 
-            // request initial address dump
-            request_addr_dump(nl);
+                // request initial address dump
+                request_addr_dump(nl);
 
-            ev_run(loop, 0);
-            ret = EXIT_SUCCESS;
+                ev_run(loop, 0);
+                ret = EXIT_SUCCESS;
 
-            mnl_socket_close(nl);
+                mnl_socket_close(nl);
+            }
+
+            cleanup_config();
         }
 
-        cfg_free(config);
+        curl_global_cleanup();
     }
 
     return ret;

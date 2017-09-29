@@ -18,11 +18,11 @@ sbin_PROGRAMS = nlddcd
 ##systemdsystemunit_DATA = gw-monitor.service
 ##dist_man_MANS = gw-monitor.8
 
-AM_CFLAGS = $(MNL_CFLAGS) $(CONFUSE_CFLAGS)
+AM_CFLAGS = $(MNL_CFLAGS) $(CONFUSE_CFLAGS) $(CURL_CFLAGS)
 AM_CPPFLAGS = -DSYSCONFDIR="\"${sysconfdir}\""
 
-nlddcd_SOURCES = nlddcd.c nlutils.c nlutils.h
-nlddcd_LDADD = $(MNL_LIBS) $(CONFUSE_LIBS)
+nlddcd_SOURCES = nlddcd.c conf.c conf.h
+nlddcd_LDADD = $(MNL_LIBS) $(CONFUSE_LIBS) $(CURL_LIBS)
 
 ##CLEANFILES = $(systemdsystemunit_DATA)
 ##EXTRA_DIST = gw-monitor.service.in gw-monitor.sysconfig
