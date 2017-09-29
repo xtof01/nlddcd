@@ -89,13 +89,28 @@ size_t curl_recv_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 }
 
 
+void print_curl_error(CURLcode res, const char *errorbuffer)
+{
+    size_t len = strlen(errorbuffer);
+
+    fprintf(stderr, "error: (%d) ", res);
+    if (len > 0) {
+        fprintf(stderr, "%s%s", errorbuffer,
+                ((errorbuffer[len - 1] != '\n') ? "\n" : ""));
+    }
+    else {
+        fprintf(stderr, "%s\n", curl_easy_strerror(res));
+    }
+}
+
+
 void perform_ddns_update(interface_status_t *if_stat)
 {
     CURL *curl;
     char ipaddrstr[INET_ADDRSTRLEN];
     char ip6addrstr[INET6_ADDRSTRLEN];
-    size_t buflen = strlen(if_stat->url) + strlen(if_stat->domain) + 128;
-    char *urlbuffer = malloc(buflen);
+    size_t urllen = strlen(if_stat->url) + strlen(if_stat->domain) + 128;
+    char *urlbuffer = malloc(urllen);
     char *errorbuffer = malloc(CURL_ERROR_SIZE);
     response_t *response = malloc(sizeof *response);
 
@@ -110,7 +125,8 @@ void perform_ddns_update(interface_status_t *if_stat)
         n_addrs++;
     }
 
-    snprintf(urlbuffer, buflen, "%s?hostname=%s&myip=%s%s%s",
+    // build request URL
+    snprintf(urlbuffer, urllen, "%s?hostname=%s&myip=%s%s%s",
              if_stat->url, if_stat->domain,
              if_stat->local_ipaddr_set ? ipaddrstr : "",
              n_addrs > 1 ? "," : "",
@@ -133,9 +149,10 @@ void perform_ddns_update(interface_status_t *if_stat)
         errorbuffer[0] = 0;
         response->length = 0;
 
+        // perform HTTP request
         res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
-            int i;
+            size_t i;
 
             response->data[response->length] = 0;
             printf("response: %s\n", response->data);
@@ -147,6 +164,7 @@ void perform_ddns_update(interface_status_t *if_stat)
                 }
             }
 
+            // check response
             if (strcmp(response->data, "good") == 0 ||
                 strcmp(response->data, "nochg") == 0) {
                 printf("Update succeeded\n");
@@ -162,16 +180,7 @@ void perform_ddns_update(interface_status_t *if_stat)
             }
         }
         else {
-            size_t len = strlen(errorbuffer);
-
-            fprintf(stderr, "error: (%d) ", res);
-            if (len > 0) {
-                fprintf(stderr, "%s%s", errorbuffer,
-                        ((errorbuffer[len - 1] != '\n') ? "\n" : ""));
-            }
-            else {
-                fprintf(stderr, "%s\n", curl_easy_strerror(res));
-            }
+            print_curl_error(res, errorbuffer);
         }
         curl_easy_cleanup(curl);
     }
@@ -191,6 +200,7 @@ void resolve_domain(interface_status_t *if_stat)
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
 
+    // try to get A and AAAA records of domain
     ret = getaddrinfo(if_stat->domain, NULL, &hints, &result);
     if (ret == 0) {
         for (addr = result; addr != NULL; addr = addr->ai_next) {
@@ -226,6 +236,7 @@ void timeout_cb(EV_P_ ev_timer *w, int revents)
         resolve_domain(if_stat);
     }
 
+    // compare local and remote addresses
     if (if_stat->local_ipaddr.s_addr != if_stat->dns_ipaddr.s_addr) {
         printf("IPv4 address of interface %s differs from address of %s\n",
                if_stat->ifname, if_stat->domain);
@@ -542,7 +553,6 @@ int main(int argc, char *argv[])
             syntax();
             return EXIT_FAILURE;
         }
-
     }
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK) {
