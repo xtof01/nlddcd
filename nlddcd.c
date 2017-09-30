@@ -152,12 +152,10 @@ void perform_ddns_update(interface_status_t *if_stat)
         // perform HTTP request
         res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
-            size_t i;
-
             response->data[response->length] = 0;
             printf("response: %s\n", response->data);
 
-            for (i = 0; i < response->length; i++) {
+            for (size_t i = 0; i < response->length; i++) {
                 if (!isalnum(response->data[i])) {
                     response->data[i] = 0;
                     break;
@@ -427,9 +425,8 @@ int join_mcast_groups(struct mnl_socket *nl)
         RTNLGRP_IPV6_IFADDR,
     };
     int ret = 0;
-    size_t i;
 
-    for (i = 0; i < MNL_ARRAY_SIZE(groups) && ret == 0; i++) {
+    for (size_t i = 0; i < MNL_ARRAY_SIZE(groups) && ret == 0; i++) {
         ret = mnl_socket_setsockopt(nl, NETLINK_ADD_MEMBERSHIP,
                                     &groups[i], sizeof groups[i]);
     }

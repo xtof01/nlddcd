@@ -64,13 +64,13 @@ static cfg_t *parse_config(const char *cfgfile)
 
 static void prepare_interface_status(interface_status_t **if_stat_head)
 {
-    unsigned int i, num_interfaces;
+    unsigned int num_interfaces;
     interface_status_t *if_stat;
 
     *if_stat_head = NULL;
     num_interfaces = cfg_size(config, "interface");
 
-    for (i = 0; i < num_interfaces; i++) {
+    for (int i = 0; i < num_interfaces; i++) {
         if_stat = calloc(sizeof *if_stat, 1);
 
         ev_timer_init(&if_stat->timeout, timeout_cb, 0.0, 5.0);
