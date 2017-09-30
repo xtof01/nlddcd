@@ -21,6 +21,7 @@ typedef struct interface_status {
     bool dns_ipaddr_set;
     bool local_ip6addr_set;
     bool dns_ip6addr_set;
+    bool resolved;
     struct interface_status *next;
 } interface_status_t;
 

@@ -171,9 +171,11 @@ void perform_ddns_update(interface_status_t *if_stat)
                 if (if_stat->local_ipaddr_set) {
                     if_stat->dns_ipaddr = if_stat->local_ipaddr;
                 }
+                if_stat->dns_ipaddr_set = if_stat->local_ipaddr_set;
                 if (if_stat->local_ip6addr_set) {
                     if_stat->dns_ip6addr = if_stat->local_ip6addr;
                 }
+                if_stat->dns_ip6addr_set = if_stat->local_ip6addr_set;
             }
             else {
                 printf("Update failed\n");
@@ -203,25 +205,29 @@ void resolve_domain(interface_status_t *if_stat)
     // try to get A and AAAA records of domain
     ret = getaddrinfo(if_stat->domain, NULL, &hints, &result);
     if (ret == 0) {
+        if_stat->dns_ipaddr_set = false;
+        if_stat->dns_ip6addr_set = false;
+
         for (addr = result; addr != NULL; addr = addr->ai_next) {
             switch (addr->ai_family) {
             case AF_INET:
                 if_stat->dns_ipaddr = ((struct sockaddr_in *)addr->ai_addr)->sin_addr;
+                if_stat->dns_ipaddr_set = true;
                 break;
             case AF_INET6:
                 if_stat->dns_ip6addr = ((struct sockaddr_in6 *)addr->ai_addr)->sin6_addr;
+                if_stat->dns_ip6addr_set = true;
                 break;
             }
         }
+
+        if_stat->resolved = true;
 
         freeaddrinfo(result);
     }
     else {
         fprintf(stderr, "%s: %s\n", if_stat->domain, gai_strerror(ret));
     }
-
-    if_stat->dns_ipaddr_set = true;
-    if_stat->dns_ip6addr_set = true;
 }
 
 
@@ -232,24 +238,34 @@ void timeout_cb(EV_P_ ev_timer *w, int revents)
 
     ev_timer_stop(EV_A_ w);
 
-    if (!if_stat->dns_ipaddr_set || !if_stat->dns_ip6addr_set) {
+    if (!if_stat->resolved) {
         resolve_domain(if_stat);
     }
 
     // compare local and remote addresses
-    if (if_stat->local_ipaddr.s_addr != if_stat->dns_ipaddr.s_addr) {
+    if ((if_stat->local_ipaddr_set != if_stat->dns_ipaddr_set) ||
+        (if_stat->local_ipaddr_set == true && /*if_stat->dns_ipaddr_set == true &&*/
+         if_stat->local_ipaddr.s_addr != if_stat->dns_ipaddr.s_addr)) {
         printf("IPv4 address of interface %s differs from address of %s\n",
                if_stat->ifname, if_stat->domain);
         update_required = true;
     }
-    if (memcmp(if_stat->local_ip6addr.s6_addr, if_stat->dns_ip6addr.s6_addr, 16) != 0) {
+    if ((if_stat->local_ip6addr_set != if_stat->dns_ip6addr_set) ||
+        (if_stat->local_ip6addr_set == true && /*if_stat->dns_ip6addr_set == true &&*/
+         memcmp(if_stat->local_ip6addr.s6_addr, if_stat->dns_ip6addr.s6_addr, 16) != 0)) {
         printf("IPv6 address of interface %s differs from address of %s\n",
                if_stat->ifname, if_stat->domain);
         update_required = true;
     }
 
     if (update_required) {
-        perform_ddns_update(if_stat);
+        if (if_stat->local_ipaddr_set || if_stat->local_ip6addr_set) {
+            perform_ddns_update(if_stat);
+        }
+        else {
+            printf("No addresses configured on interface %s, skipping update\n",
+                   if_stat->ifname);
+        }
     }
 }
 
@@ -270,6 +286,7 @@ size_t af_addr_size(unsigned char family)
 void parse_addr_msg(const struct nlmsghdr *nlh)
 {
     char ifname[IF_NAMESIZE];
+    char addrstr[INET6_ADDRSTRLEN];
     unsigned int flags;
     const void *addr = NULL;
     const struct nlattr *attr;
@@ -323,15 +340,29 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
                     continue;
                 }
 
-                if (!*local_addr_set || memcmp(local_addr, addr, addrsize) != 0) {
-                    char addrstr[INET6_ADDRSTRLEN];
+                switch (nlh->nlmsg_type) {
+                case RTM_NEWADDR:
+                    if (!*local_addr_set || memcmp(local_addr, addr, addrsize) != 0) {
 
-                    printf("detected address change on %s: %s\n",
-                           ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
-                    memcpy(local_addr, addr, addrsize);
-                    *local_addr_set = true;
+                        printf("detected address change on %s: %s\n",
+                               ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
+                        memcpy(local_addr, addr, addrsize);
+                        *local_addr_set = true;
 
-                    ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
+                        ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
+                    }
+                    break;
+
+                case RTM_DELADDR:
+                    if (*local_addr_set && memcmp(local_addr, addr, addrsize) == 0) {
+                        printf("address removed from %s: %s\n",
+                               ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
+                        memset(local_addr, 0, addrsize);
+                        *local_addr_set = false;
+
+                        ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
+                    }
+                    break;
                 }
             }
         }
@@ -343,6 +374,7 @@ int nl_msg_cb(const struct nlmsghdr *nlh, void *data)
 {
     switch (nlh->nlmsg_type) {
     case RTM_NEWADDR:
+    case RTM_DELADDR:
         parse_addr_msg(nlh);
         break;
     }
