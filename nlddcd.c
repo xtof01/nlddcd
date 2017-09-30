@@ -266,106 +266,18 @@ size_t af_addr_size(unsigned char family)
     }
 }
 
-#if 0
-int parse_addr_attr_cb(const struct nlattr *attr, void *data)
-{
-    if (mnl_attr_type_valid(attr, RTA_MAX) < 0)
-        return MNL_CB_OK;
-
-    char addr[INET6_ADDRSTRLEN];
-    unsigned char ifa_family = (unsigned char)(uintptr_t)data;
-    size_t addrsize = af_addr_size(ifa_family);
-    int type = mnl_attr_get_type(attr);
-
-    printf("      rta_type: %s\n", ifa_rta_type2str(type));
-
-    switch (type) {
-    case IFA_ADDRESS:
-    case IFA_LOCAL:
-    case IFA_BROADCAST:
-    case IFA_ANYCAST:
-        if (mnl_attr_validate2(attr, MNL_TYPE_BINARY, addrsize) < 0) {
-            perror("mnl_attr_validate2");
-            return MNL_CB_ERROR;
-        }
-        break;
-
-    case IFA_CACHEINFO:
-        if (mnl_attr_validate2(attr, MNL_TYPE_BINARY, sizeof (struct ifa_cacheinfo)) < 0) {
-            perror("mnl_attr_validate2");
-            return MNL_CB_ERROR;
-        }
-        break;
-
-    case IFA_LABEL:
-        if (mnl_attr_validate(attr, MNL_TYPE_NUL_STRING) < 0) {
-            perror("mnl_attr_validate");
-            return MNL_CB_ERROR;
-        }
-        break;
-
-    case IFA_FLAGS:
-        if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0) {
-            perror("mnl_attr_validate");
-            return MNL_CB_ERROR;
-        }
-        break;
-    }
-
-    if (type == IFA_ADDRESS) {
-        inet_ntop(ifa_family, mnl_attr_get_payload(attr), addr, sizeof addr);
-        printf("        address: %s\n", addr);
-    }
-    if (type == IFA_LOCAL) {
-        inet_ntop(ifa_family, mnl_attr_get_payload(attr), addr, sizeof addr);
-        printf("        local:   %s\n", addr);
-    }
-    if (type == IFA_LABEL) {
-        printf("        label:   %s\n", mnl_attr_get_str(attr));
-    }
-    if (type == IFA_BROADCAST) {
-        inet_ntop(ifa_family, mnl_attr_get_payload(attr), addr, sizeof addr);
-        printf("        brcst:   %s\n", addr);
-    }
-    if (type == IFA_ANYCAST) {
-        inet_ntop(ifa_family, mnl_attr_get_payload(attr), addr, sizeof addr);
-        printf("        anycast: %s\n", addr);
-    }
-    if (type == IFA_CACHEINFO) {
-        struct ifa_cacheinfo *ci = mnl_attr_get_payload(attr);
-
-        printf("        ifa_prefered: %u\n", ci->ifa_prefered);
-        printf("        ifa_valid:    %u\n", ci->ifa_valid);
-        printf("        cstamp:       %u\n", ci->cstamp);
-        printf("        tstamp:       %u\n", ci->tstamp);
-    }
-    if (type == IFA_FLAGS) {
-        unsigned int flags = mnl_attr_get_u32(attr);
-
-        printf("        flags:        %s\n", ifa_flags2str(flags));
-    }
-
-    return MNL_CB_OK;
-}
-#endif
 
 void parse_addr_msg(const struct nlmsghdr *nlh)
 {
     char ifname[IF_NAMESIZE];
+    unsigned int flags;
     const void *addr = NULL;
     const struct nlattr *attr;
     const struct ifaddrmsg *ifa = mnl_nlmsg_get_payload(nlh);
     size_t addrsize = af_addr_size(ifa->ifa_family);
 
     if_indextoname(ifa->ifa_index, ifname);
-    /*
-    printf("  nlmsg_type:  %s\n", nlmsg_type2str(nlh->nlmsg_type));
-    printf("    ifa_family:    %s\n", ifa_family2str(ifa->ifa_family));
-    printf("    ifa_prefixlen: %u\n", ifa->ifa_prefixlen);
-    printf("    ifa_flags:     %s\n", ifa_flags2str(ifa->ifa_flags));
-    printf("    ifa_scope:     %s\n", rtm_scope2str(ifa->ifa_scope));
-    printf("    ifa_index:     %s (%d)\n", ifname, ifa->ifa_index);
-    */
+    flags = ifa->ifa_flags;
 
     mnl_attr_for_each(attr, nlh, sizeof *ifa) {
         if (mnl_attr_type_valid(attr, RTA_MAX) > 0) {
@@ -376,12 +288,21 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
                     addr = mnl_attr_get_payload(attr);
                 }
             }
+            if (type == IFA_ADDRESS && addr == NULL) {
+                if (mnl_attr_validate2(attr, MNL_TYPE_BINARY, addrsize) >= 0) {
+                    addr = mnl_attr_get_payload(attr);
+                }
+            }
+            if (type == IFA_FLAGS) {
+                if (mnl_attr_validate(attr, MNL_TYPE_U32) >= 0) {
+                    flags = mnl_attr_get_u32(attr);
+                }
+            }
         }
     }
 
-    //mnl_attr_parse(nlh, sizeof *ifa, parse_addr_attr_cb, (void *)(uintptr_t)ifa->ifa_family);
-
-    if (addr != NULL) {
+    // found non-temporary global address?
+    if (addr != NULL && ifa->ifa_scope == RT_SCOPE_UNIVERSE && (flags & IFA_F_TEMPORARY) == 0) {
         interface_status_t *if_stat;
 
         for (if_stat = if_stat_head; if_stat != NULL; if_stat = if_stat->next) {
@@ -459,7 +380,7 @@ void request_addr_dump(struct mnl_socket *nl)
 	nlh->nlmsg_seq = ++seq;
     nlh->nlmsg_pid = portid;
     rt = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtgenmsg));
-    rt->rtgen_family = AF_INET;
+    rt->rtgen_family = AF_UNSPEC;
 
     if (mnl_socket_sendto(nl, buf, nlh->nlmsg_len) < 0) {
         perror("mnl_socket_sendto");
@@ -467,9 +388,25 @@ void request_addr_dump(struct mnl_socket *nl)
 }
 
 
+int join_mcast_groups(struct mnl_socket *nl)
+{
+    int groups[] = {
+        RTNLGRP_IPV4_IFADDR,
+        RTNLGRP_IPV6_IFADDR,
+    };
+    int ret = 0;
+    size_t i;
+
+    for (i = 0; i < MNL_ARRAY_SIZE(groups) && ret == 0; i++) {
+        ret = mnl_socket_setsockopt(nl, NETLINK_ADD_MEMBERSHIP,
+                                    &groups[i], sizeof groups[i]);
+    }
+    return ret;
+}
+
+
 struct mnl_socket *nl_open()
 {
-    int group = RTNLGRP_IPV4_IFADDR;
     struct mnl_socket *nl;
 
     nl = mnl_socket_open(NETLINK_ROUTE);
@@ -482,8 +419,7 @@ struct mnl_socket *nl_open()
                 portid = mnl_socket_get_portid(nl);
                 seq = time(NULL);
 
-                if (mnl_socket_setsockopt(nl, NETLINK_ADD_MEMBERSHIP,
-                                          &group, sizeof group) == 0) {
+                if (join_mcast_groups(nl) == 0) {
                     return nl;
                 }
                 else {
