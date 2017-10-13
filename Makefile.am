@@ -22,7 +22,7 @@ dist_man_MANS = nlddcd.8
 AM_CFLAGS = $(MNL_CFLAGS) $(CONFUSE_CFLAGS) $(CURL_CFLAGS)
 AM_CPPFLAGS = -DSYSCONFDIR="\"${sysconfdir}\""
 
-nlddcd_SOURCES = nlddcd.c conf.c conf.h
+nlddcd_SOURCES = nlddcd.c conf.c conf.h net.c net.h
 nlddcd_LDADD = $(MNL_LIBS) $(CONFUSE_LIBS) $(CURL_LIBS)
 
 CLEANFILES = $(systemdsystemunit_DATA)
