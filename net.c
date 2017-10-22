@@ -131,6 +131,7 @@ void perform_ddns_update(interface_status_t *if_stat)
         }
         curl_easy_cleanup(curl);
     }
+    fflush(stdout);
 
     free(response);
     free(errorbuffer);

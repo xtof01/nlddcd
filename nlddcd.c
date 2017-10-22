@@ -90,12 +90,14 @@ void timeout_cb(EV_P_ ev_timer *w, int revents)
     }
 
     if (update_required) {
+        fflush(stdout);
         if (if_stat->local_ipaddr_set || if_stat->local_ip6addr_set) {
             perform_ddns_update(if_stat);
         }
         else {
             printf("No addresses configured on interface %s, skipping update\n",
                    if_stat->ifname);
+            fflush(stdout);
         }
     }
 }
@@ -177,6 +179,7 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
 
                         printf("detected address change on %s: %s\n",
                                ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
+                        fflush(stdout);
                         memcpy(local_addr, addr, addrsize);
                         *local_addr_set = true;
 
@@ -188,6 +191,7 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
                     if (*local_addr_set && memcmp(local_addr, addr, addrsize) == 0) {
                         printf("address removed from %s: %s\n",
                                ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
+                        fflush(stdout);
                         memset(local_addr, 0, addrsize);
                         *local_addr_set = false;
 
