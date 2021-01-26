@@ -108,14 +108,16 @@ void timeout_cb(EV_P_ ev_timer *w, int revents)
     }
 
     if (update_required) {
-        fflush(stdout);
         if (if_stat->local_ipaddr_set || if_stat->local_ip6addr_set) {
-            perform_ddns_update(if_stat);
+            if (!perform_ddns_update(if_stat)) {
+                printf("Retrying in 30 seconds ...\n");
+                if_stat->timeout.repeat = 30.0;
+                ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
+            }
         }
         else {
             printf("No addresses configured on interface %s, skipping update\n",
                    if_stat->ifname);
-            fflush(stdout);
         }
     }
 }
@@ -197,10 +199,10 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
 
                         printf("detected address change on %s: %s\n",
                                ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
-                        fflush(stdout);
                         memcpy(local_addr, addr, addrsize);
                         *local_addr_set = true;
 
+                        if_stat->timeout.repeat = 5.0;
                         ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
                     }
                     break;
@@ -209,10 +211,10 @@ void parse_addr_msg(const struct nlmsghdr *nlh)
                     if (*local_addr_set && memcmp(local_addr, addr, addrsize) == 0) {
                         printf("address removed from %s: %s\n",
                                ifname, inet_ntop(ifa->ifa_family, addr, addrstr, sizeof addrstr));
-                        fflush(stdout);
                         memset(local_addr, 0, addrsize);
                         *local_addr_set = false;
 
+                        if_stat->timeout.repeat = 5.0;
                         ev_timer_again(EV_DEFAULT_ &if_stat->timeout);
                     }
                     break;
@@ -374,6 +376,9 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
     }
+
+    // enforce line-buffered stdout
+    setlinebuf(stdout);
 
     if (init_net()) {
         // read configuration

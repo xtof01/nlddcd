@@ -23,7 +23,7 @@
 
 #include "conf.h"
 
-void perform_ddns_update(interface_status_t *if_stat);
+bool perform_ddns_update(interface_status_t *if_stat);
 void resolve_domain(interface_status_t *if_stat);
 bool init_net(void);
 void cleanup_net(void);

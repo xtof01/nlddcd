@@ -69,7 +69,7 @@ static void print_curl_error(CURLcode res, const char *errorbuffer)
 }
 
 
-void perform_ddns_update(interface_status_t *if_stat)
+bool perform_ddns_update(interface_status_t *if_stat)
 {
     CURL *curl;
     char ipaddrstr[INET_ADDRSTRLEN];
@@ -78,6 +78,7 @@ void perform_ddns_update(interface_status_t *if_stat)
     char *urlbuffer = malloc(urllen);
     char *errorbuffer = malloc(CURL_ERROR_SIZE);
     response_t *response = malloc(sizeof *response);
+    bool success = false;
 
     int n_addrs = 0;
 
@@ -96,8 +97,6 @@ void perform_ddns_update(interface_status_t *if_stat)
              if_stat->local_ipaddr_set ? ipaddrstr : "",
              n_addrs > 1 ? "," : "",
              if_stat->local_ip6addr_set ? ip6addrstr : "");
-
-    //printf("URL: %s\n", urlbuffer);
 
     if ((curl = curl_easy_init()) != NULL) {
         CURLcode res;
@@ -143,17 +142,22 @@ void perform_ddns_update(interface_status_t *if_stat)
             else {
                 printf("Update failed\n");
             }
+
+            // return success here even if the actual update failed,
+            // because at this level it doesn't make sense to retry it
+            success = true;
         }
         else {
             print_curl_error(res, errorbuffer);
         }
         curl_easy_cleanup(curl);
     }
-    fflush(stdout);
 
     free(response);
     free(errorbuffer);
     free(urlbuffer);
+
+    return success;
 }
 
 
