@@ -1,7 +1,7 @@
-AC_INIT([nlddcd], [0.2], [christof@efkemann.net])
+AC_INIT([nlddcd], [0.3], [christof@efkemann.net])
 AC_CONFIG_AUX_DIR([.ac])
 
-AM_INIT_AUTOMAKE([foreign 1.11 -Wall -Wno-portability dist-xz no-dist-gzip])
+AM_INIT_AUTOMAKE([foreign 1.11 -Wall -Wno-portability tar-pax dist-xz no-dist-gzip])
 AM_SILENT_RULES([yes])
 AC_LANG([C])
 AC_PROG_CC_C99
